@@ -1111,6 +1111,9 @@ test("CLI timeout: a real listener that accepts but never responds exits 3", asy
 
 interface CliHandlersModule {
   buildIntentArgs: (args: string[]) => { intent: any; error?: string };
+  COMMAND_TREE: TestCommandNode[];
+  dispatch: (args: string[]) => Promise<number>;
+  formatCommandHelp: () => string;
   getCompletionCandidates: (args: string[], prefix?: string) => string[];
   cmdPolicyGet: (agentId: string) => Promise<number>;
   cmdActivityList: (agentId: string, limit: string) => Promise<number>;
@@ -1128,6 +1131,11 @@ interface CliHandlersModule {
   cmdApprovalGet: (id: string) => Promise<number>;
 }
 
+interface TestCommandNode {
+  name: string;
+  children?: TestCommandNode[];
+}
+
 let cachedHandlersPromise: Promise<CliHandlersModule> | null = null;
 
 test("CLI completion candidates come from command registry", async () => {
@@ -1138,6 +1146,87 @@ test("CLI completion candidates come from command registry", async () => {
   assert.deepEqual(mod.getCompletionCandidates(["agent", "get"], "anything"), []);
 });
 
+test("every declared command path appears in help/completion and dispatches safely", async () => {
+  const mod = await loadCliHandlers();
+  const commandPaths: string[][] = [];
+  const collectPaths = (nodes: TestCommandNode[], prefix: string[] = []) => {
+    for (const node of nodes) {
+      const path = [...prefix, node.name];
+      if (node.children) collectPaths(node.children, path);
+      else commandPaths.push(path);
+    }
+  };
+  collectPaths(mod.COMMAND_TREE);
+
+  const help = mod.formatCommandHelp();
+  const exampleArgs: Record<string, string[]> = {
+    "agent get": ["agent-1"],
+    "agent create": ["example-agent"],
+    "agent pause": ["agent-1"],
+    "agent resume": ["agent-1"],
+    "agent disable": ["agent-1"],
+    "approval get": ["approval-1"],
+    "approval approve": ["approval-1"],
+    "approval reject": ["approval-1"],
+    "execution get": ["execution-1"],
+    "execution retry": ["execution-1"],
+    "execution cancel": ["execution-1"],
+    "policy get": ["agent-1"],
+    "policy update": ["agent-1", "--rules", "{}"],
+    "activity list": ["agent-1"],
+    "activity get": ["agent-1", "activity-1"],
+    "schedule list": ["agent-1"],
+    "schedule get": ["agent-1", "schedule-1"],
+    "schedule create": ["agent-1", "0 * * * *", "payment", "XLM", "1", "GDEST", "test"],
+    "schedule update": ["agent-1", "schedule-1", "0 * * * *"],
+    "schedule pause": ["agent-1", "schedule-1"],
+    "schedule resume": ["agent-1", "schedule-1"],
+    "schedule disable": ["agent-1", "schedule-1"],
+    "schedule delete": ["agent-1", "schedule-1"],
+    "intent submit": ["agent-1", "payment", "XLM", "1", "GDEST", "test"],
+    completion: ["bash"],
+  };
+  const localOnlyCommands = new Set(["--version", "-v", "--help", "-h", "help", "completion"]);
+  const originalFetch = globalThis.fetch;
+  const originalLog = console.log;
+  const originalError = console.error;
+  let mockFetchCalls = 0;
+  globalThis.fetch = (async () => {
+    mockFetchCalls++;
+    return new Response(JSON.stringify({ error: "mocked API response" }), { status: 500 });
+  }) as typeof fetch;
+  console.log = () => {};
+  console.error = () => {};
+
+  try {
+    for (const path of commandPaths) {
+      const label = path.join(" ");
+      assert.ok(help.includes(`  ${label}`), `${label} should be represented in help`);
+      for (let depth = 0; depth < path.length; depth++) {
+        assert.ok(
+          mod.getCompletionCandidates(path.slice(0, depth), path[depth]).includes(path[depth]),
+          `${path[depth]} at ${path.slice(0, depth).join(" ") || "root"} should be completable`,
+        );
+      }
+
+      mockFetchCalls = 0;
+      const dispatchArgs = [...path, ...(exampleArgs[label] ?? [])];
+      const result = await mod.dispatch(dispatchArgs);
+      if (localOnlyCommands.has(path[0]!)) {
+        assert.equal(result, 0, `${label} should dispatch locally`);
+        assert.equal(mockFetchCalls, 0, `${label} must not make an API request`);
+      } else {
+        assert.equal(result, 1, `${label} should reach the mocked API and report its error`);
+        assert.equal(mockFetchCalls, 1, `${label} should dispatch exactly one mocked API request`);
+      }
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    console.log = originalLog;
+    console.error = originalError;
+  }
+});
+
 function loadCliHandlers(): Promise<CliHandlersModule> {
   if (!cachedHandlersPromise) {
     cachedHandlersPromise = (async () => {
@@ -1145,6 +1234,9 @@ function loadCliHandlers(): Promise<CliHandlersModule> {
         /dispatch\(process\.argv\.slice\(2\)\)\.then\([\s\S]*$/,
         `export {
   buildIntentArgs,
+  COMMAND_TREE,
+  dispatch,
+  formatCommandHelp,
   getCompletionCandidates,
   cmdPolicyGet,
   cmdActivityList,
