@@ -172,6 +172,34 @@ test("CLI: help documents both version flags", () => {
   assert.equal(r.code, 0);
   assert.match(r.stdout, /--version/);
   assert.match(r.stdout, /-v/);
+  assert.match(r.stdout, /completion <bash\|zsh>/);
+});
+
+test("CLI: bash and zsh completion commands print setup scripts", () => {
+  const bash = run(["completion", "bash"]);
+  assert.equal(bash.code, 0);
+  assert.match(bash.stdout, /complete -F _4evergent_complete 4evergent/);
+  assert.match(bash.stdout, /__complete/);
+
+  const zsh = run(["completion", "zsh"]);
+  assert.equal(zsh.code, 0);
+  assert.match(zsh.stdout, /compdef _4evergent 4evergent/);
+  assert.match(zsh.stdout, /__complete/);
+});
+
+test("CLI: internal completion follows the declared command tree and prefix", () => {
+  const root = run(["__complete", "--", "", ""]);
+  assert.equal(root.code, 0);
+  assert.match(root.stdout, /health/);
+  assert.match(root.stdout, /agent/);
+
+  const agent = run(["__complete", "--", "agent", "pa"]);
+  assert.equal(agent.code, 0);
+  assert.deepEqual(agent.stdout.trim().split("\n"), ["pause"]);
+
+  const intent = run(["__complete", "--", "intent", ""]);
+  assert.equal(intent.code, 0);
+  assert.deepEqual(intent.stdout.trim().split("\n"), ["submit"]);
 });
 
 test("CLI: health success → exit 0, prints status", () => {
@@ -1083,6 +1111,7 @@ test("CLI timeout: a real listener that accepts but never responds exits 3", asy
 
 interface CliHandlersModule {
   buildIntentArgs: (args: string[]) => { intent: any; error?: string };
+  getCompletionCandidates: (args: string[], prefix?: string) => string[];
   cmdPolicyGet: (agentId: string) => Promise<number>;
   cmdActivityList: (agentId: string, limit: string) => Promise<number>;
   cmdScheduleList: (agentId: string, limit: string) => Promise<number>;
@@ -1101,13 +1130,22 @@ interface CliHandlersModule {
 
 let cachedHandlersPromise: Promise<CliHandlersModule> | null = null;
 
+test("CLI completion candidates come from command registry", async () => {
+  const mod = await loadCliHandlers();
+  assert.ok(mod.getCompletionCandidates([], "hea").includes("health"));
+  assert.deepEqual(mod.getCompletionCandidates(["agent"], "pa"), ["pause"]);
+  assert.deepEqual(mod.getCompletionCandidates(["schedule"], "re"), ["resume"]);
+  assert.deepEqual(mod.getCompletionCandidates(["agent", "get"], "anything"), []);
+});
+
 function loadCliHandlers(): Promise<CliHandlersModule> {
   if (!cachedHandlersPromise) {
     cachedHandlersPromise = (async () => {
       const cliSource = readFileSync(CLI, "utf-8").replace(
-        /main\(\)\.then\([\s\S]*$/,
+        /dispatch\(process\.argv\.slice\(2\)\)\.then\([\s\S]*$/,
         `export {
   buildIntentArgs,
+  getCompletionCandidates,
   cmdPolicyGet,
   cmdActivityList,
   cmdScheduleList,
